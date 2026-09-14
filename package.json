@@ -13,6 +13,9 @@
     "cli"
   ],
   "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/sumit1612/pi-usage.git"
