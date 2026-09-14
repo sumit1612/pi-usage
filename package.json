@@ -1,6 +1,6 @@
 {
   "name": "pi-usage-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Token, context, and cost usage dashboard for the pi coding agent — a themed CLI plus an interactive /usage command",
   "keywords": [
     "pi-package",
@@ -32,7 +32,9 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./extensions"],
+    "extensions": [
+      "./extensions"
+    ],
     "image": "./docs/screenshot.png"
   },
   "peerDependencies": {
@@ -40,8 +42,12 @@
     "@earendil-works/pi-tui": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "@earendil-works/pi-tui": { "optional": true }
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=18"
