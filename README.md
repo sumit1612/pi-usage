@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="pi-usage dashboard" width="640">
+  <img src="https://raw.githubusercontent.com/sumit1612/pi-usage/main/docs/screenshot.png" alt="pi-usage dashboard" width="640">
 </p>
 
 ---
