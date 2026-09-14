@@ -1,5 +1,5 @@
 {
-  "name": "@sumitsingh001/pi-usage",
+  "name": "pi-usage-cli",
   "version": "1.0.0",
   "description": "Token, context, and cost usage dashboard for the pi coding agent — a themed CLI plus an interactive /usage command",
   "keywords": [
