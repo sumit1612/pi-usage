@@ -205,8 +205,10 @@ test('toData exposes the full extended shape', () => {
       assert.ok(k in d, `missing key ${k}`);
     }
     assert.deepEqual(Object.keys(d.byProvider).sort(), ['p1', 'p2']);
-    // api breakdown: 4 openai-completions calls (a1,a2,a3,s1), run2 transcript has no api field
-    assert.equal(d.apiBreakdown['openai-completions'].calls, 4);
+    // api breakdown keyed by provider/api: p1 → a1,a2,a3 (3), p2 → s1 (1);
+    // run2 transcript has no api field so it's excluded.
+    assert.equal(d.apiBreakdown['p1/openai-completions'].calls, 3);
+    assert.equal(d.apiBreakdown['p2/openai-completions'].calls, 1);
   } finally {
     cleanup();
   }

@@ -1,761 +1,113 @@
 #!/usr/bin/env node
 'use strict';
 
-/*
- * pi-usage — token / context / cost dashboard for the pi coding agent (CLI).
- *
- * Aggregation lives in ../lib/core.js (shared with the /usage extension).
- * This file is presentation only: CLI parsing, theme colors, and rendering.
- *
- * Colors match pi's built-in "dark" theme:
- *   accent #8abeb7 · border #5f87ff · green #b5bd68 · text #d4d4d4
- *   muted #808080 · dim #666666 · faint #505050
- *
- * Usage:
- *   pi-usage [view] [flags]
- * Views: overview | models | providers | agents | days | sessions
- * Flags: --since N --all --model S --provider S --cwd P --limit N --dir P
- *        --sort key --group day|week|month --csv --tsv --budget N --watch
- *        --color --plain --json --help
- */
-
-const path = require('path');
 const { aggregate, toData, DEFAULT_SESSION_DIR } = require('../lib/core.js');
-
-// ---------------------------------------------------------------------------
-// Theme (pi "dark")
-// ---------------------------------------------------------------------------
-
-const PALETTE = {
-  accent: '#8abeb7',
-  blue: '#5f87ff',
-  cyan: '#00d7ff',
-  green: '#b5bd68',
-  text: '#d4d4d4',
-  muted: '#808080',
-  dim: '#666666',
-  faint: '#505050',
-  yellow: '#f0c674',
-  red: '#cc6666',
-};
-
-const NO_COLOR = !!process.env.NO_COLOR && process.env.NO_COLOR !== '0';
-const TTY = process.stdout.isTTY;
-
-let colorEnabled = false;
-let RICH = false;
-
-function hexToRgb(hex) {
-  const h = hex.replace('#', '');
-  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-}
-
-function fg(hex, s, attrs) {
-  if (!colorEnabled) return s;
-  const [r, g, b] = hexToRgb(hex);
-  const codes = (attrs ? attrs + ';' : '') + `38;2;${r};${g};${b}`;
-  return `\x1b[${codes}m${s}\x1b[0m`;
-}
-
-const A = (s, a) => fg(PALETTE.accent, s, a);
-const BL = (s, a) => fg(PALETTE.blue, s, a);
-const CY = (s, a) => fg(PALETTE.cyan, s, a);
-const G = (s, a) => fg(PALETTE.green, s, a);
-const Y = (s, a) => fg(PALETTE.yellow, s, a);
-const R = (s, a) => fg(PALETTE.red, s, a);
-const T = (s, a) => fg(PALETTE.text, s, a);
-const M = (s, a) => fg(PALETTE.muted, s, a);
-const D = (s, a) => fg(PALETTE.dim, s, a);
-const F = (s, a) => fg(PALETTE.faint, s, a);
-
-function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;]*m/g, '');
-}
-function visLen(s) {
-  return stripAnsi(s).length;
-}
-function pad(s, n, align) {
-  s = String(s);
-  const v = stripAnsi(s);
-  if (v.length >= n) return s;
-  const gap = ' '.repeat(n - v.length);
-  return align === 'right' ? gap + s : s + gap;
-}
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
-const HELP = `pi-usage — token / context / cost dashboard for pi
-
-USAGE
-  pi-usage [view] [flags]
-
-VIEWS
-  overview   totals + usage + models + providers  (default)
-  models     per-model table (with efficiency metrics)
-  providers  per-provider table
-  agents     per-subagent-agent table
-  days       per-day table + bars
-  sessions   per-session table
-
-FLAGS
-  --since <n>      last N days (default 30)
-  --all            include all time
-  --model <str>    filter by model substring
-  --provider <str> filter by provider substring
-  --cwd <path>     filter by project working directory
-  --group <g>      group days by day | week | month (default day)
-  --sort <k>       sort tables by cost | tokens | calls | name (default cost)
-  --limit <n>      max rows in tables (default 15)
-  --dir <path>     session directory (default ~/.pi/agent/sessions)
-  --csv            machine-readable CSV (per current view)
-  --tsv            machine-readable TSV (per current view)
-  --budget <n>     warn + exit 3 if total spend exceeds \$n
-  --watch          re-render every 2s (live session dir)
-  --color          force color even when piped
-  --plain          flat output (no color / unicode)
-  --json           machine-readable JSON output
-  -h, --help       show help`;
-
+const { renderDashboard } = require('../lib/presentation.js');
 const VIEWS = ['overview', 'models', 'providers', 'agents', 'days', 'sessions'];
 const SORTS = ['cost', 'tokens', 'calls', 'name'];
 const GROUPS = ['day', 'week', 'month'];
+const HELP = `pi-usage — local token and cost dashboard
+
+  pi-usage [overview|models|providers|agents|days|sessions] [flags]
+
+  --since N         last N days (default 30)
+  --all             include all time
+  --model TEXT      filter by model
+  --provider TEXT   filter by provider
+  --cwd PATH        filter by working directory
+  --dir PATH        session directory
+  --group GROUP     day | week | month
+  --sort KEY        cost | tokens | calls | name
+  --limit N         table rows (default 15)
+  --json            JSON export
+  --csv / --tsv     export the current view (overview exports models)
+  --budget N        exit 3 when recorded cost exceeds $N
+  --watch           refresh every 2 seconds
+  --color           force color
+  --plain           no color or decorative Unicode
+  -h, --help        show help
+`;
 
 function parseArgs(argv) {
-  const opts = {
-    view: 'overview',
-    since: 30,
-    all: false,
-    model: null,
-    provider: null,
-    cwd: null,
-    group: 'day',
-    sort: 'cost',
-    limit: 15,
-    dir: process.env.PI_SESSION_DIR || DEFAULT_SESSION_DIR,
-    json: false,
-    csv: false,
-    tsv: false,
-    budget: null,
-    watch: false,
-    color: false,
-    plain: false,
-  };
-
-  let i = 0;
-  const need = (a) => {
-    const v = argv[++i];
-    if (v === undefined) {
-      console.error(`Missing value for ${a}`);
-      process.exit(2);
-    }
-    return v;
-  };
-
-  for (i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    switch (a) {
-      case '-h':
-      case '--help':
-        console.log(HELP);
-        process.exit(0);
-        break;
-      case '--since':
-        opts.since = parseInt(need(a), 10);
-        if (!Number.isFinite(opts.since) || opts.since < 0) {
-          console.error('Invalid --since value (expected a non-negative integer)');
-          process.exit(2);
-        }
-        break;
-      case '--all': opts.all = true; break;
-      case '--model': opts.model = need(a); break;
-      case '--provider': opts.provider = need(a); break;
-      case '--cwd': opts.cwd = need(a); break;
-      case '--group':
-        opts.group = need(a);
-        if (!GROUPS.includes(opts.group)) {
-          console.error(`Invalid --group (expected one of: ${GROUPS.join(', ')})`);
-          process.exit(2);
-        }
-        break;
-      case '--sort':
-        opts.sort = need(a);
-        if (!SORTS.includes(opts.sort)) {
-          console.error(`Invalid --sort (expected one of: ${SORTS.join(', ')})`);
-          process.exit(2);
-        }
-        break;
-      case '--limit':
-        opts.limit = parseInt(need(a), 10);
-        if (!Number.isFinite(opts.limit) || opts.limit < 1) {
-          console.error('Invalid --limit value (expected a positive integer)');
-          process.exit(2);
-        }
-        break;
-      case '--dir': opts.dir = need(a); break;
-      case '--budget':
-        opts.budget = parseFloat(need(a));
-        if (!Number.isFinite(opts.budget) || opts.budget < 0) {
-          console.error('Invalid --budget value (expected a non-negative number)');
-          process.exit(2);
-        }
-        break;
-      case '--json': opts.json = true; break;
-      case '--csv': opts.csv = true; break;
-      case '--tsv': opts.tsv = true; break;
-      case '--watch': opts.watch = true; break;
-      case '--color': opts.color = true; break;
-      case '--plain': opts.plain = true; break;
-      default:
-        if (a.startsWith('-')) {
-          console.error(`Unknown flag: ${a}\n\n${HELP}`);
-          process.exit(2);
-        }
-        if (VIEWS.includes(a)) opts.view = a;
-        else {
-          console.error(`Unknown view: ${a}\n\n${HELP}`);
-          process.exit(2);
-        }
-    }
+  const opts = { view: 'overview', since: 30, all: false, limit: 15, sort: 'cost', group: 'day',
+    dir: process.env.PI_SESSION_DIR || DEFAULT_SESSION_DIR };
+  const flags = new Set(['all', 'json', 'csv', 'tsv', 'watch', 'color', 'plain']);
+  const values = new Set(['since', 'model', 'provider', 'cwd', 'dir', 'group', 'sort', 'limit', 'budget']);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '-h' || arg === '--help') { console.log(HELP); process.exit(0); }
+    if (VIEWS.includes(arg)) { opts.view = arg; continue; }
+    const key = arg.startsWith('--') ? arg.slice(2) : '';
+    if (flags.has(key)) { opts[key] = true; continue; }
+    if (!values.has(key)) throw new Error(`Unknown argument: ${arg}`);
+    const value = argv[++i];
+    if (value === undefined || value.startsWith('--')) throw new Error(`Missing value for ${arg}`);
+    if (['since', 'limit', 'budget'].includes(key)) {
+      const n = Number(value);
+      if (!value.trim() || !Number.isFinite(n) || n < 0 || (key !== 'budget' && !Number.isInteger(n)) || (key === 'limit' && n < 1)) {
+        throw new Error(`Invalid ${arg} value: ${value}`);
+      }
+      opts[key] = n;
+    } else opts[key] = value;
   }
+  if (!SORTS.includes(opts.sort)) throw new Error(`Invalid --sort (expected ${SORTS.join(', ')})`);
+  if (!GROUPS.includes(opts.group)) throw new Error(`Invalid --group (expected ${GROUPS.join(', ')})`);
   return opts;
 }
 
-// ---------------------------------------------------------------------------
-// Number formatting
-// ---------------------------------------------------------------------------
-
-function tok(n) {
-  return Math.round(n || 0).toLocaleString('en-US');
-}
-
-function money(n) {
-  if (!isFinite(n)) return '$0';
-  const abs = Math.abs(n);
-  if (abs === 0) return '$0.0000';
-  if (abs >= 100) return '$' + Math.round(n).toLocaleString('en-US');
-  if (abs >= 1) return '$' + n.toFixed(2);
-  return '$' + n.toFixed(4);
-}
-
-function rate(n) {
-  if (!isFinite(n)) return '$0';
-  if (n === 0) return '$0.00';
-  if (n < 0.01) return '$' + n.toFixed(4);
-  if (n < 1) return '$' + n.toFixed(3);
-  return '$' + n.toFixed(2);
-}
-
-function pct(n) {
-  if (!isFinite(n)) return '0%';
-  if (n > 0 && n < 0.5) return n.toFixed(1) + '%';
-  return Math.round(n) + '%';
-}
-
-function pct1(n) {
-  if (!isFinite(n)) return '0.0%';
-  return n.toFixed(1) + '%';
-}
-
-// ---------------------------------------------------------------------------
-// Rendering primitives
-// ---------------------------------------------------------------------------
-
-function termWidth() {
-  return process.stdout.columns && process.stdout.columns > 20 ? process.stdout.columns : 80;
-}
-
-function periodLabel(opts) {
-  if (opts.all) return 'all time';
-  return `last ${opts.since} day${opts.since === 1 ? '' : 's'}`;
-}
-
-function metaLabel(opts, agg) {
-  const parts = [`${agg.sessionsMain} main · ${agg.sessionsFork} fork · ${agg.sessionsSubagent} sub`];
-  if (opts.model) parts.push(`model ~ ${opts.model}`);
-  if (opts.provider) parts.push(`provider ~ ${opts.provider}`);
-  if (opts.cwd) parts.push(`cwd ~ ${opts.cwd}`);
-  return parts.join('  ·  ');
-}
-
-function renderHeader(opts, agg) {
-  const meta = `${periodLabel(opts)}  ·  ${metaLabel(opts, agg)}`;
-  if (!RICH) {
-    console.log(`pi-usage  ${meta}`);
-    return;
-  }
-  const width = Math.max(44, Math.min(termWidth(), 80));
-  const inner = `${A('pi-usage', '1')}   ${D(meta)}`;
-  const gap = Math.max(0, width - 2 - visLen(inner));
-  console.log(BL(`╭${'─'.repeat(width - 2)}╮`));
-  console.log(BL('│') + ' ' + inner + ' '.repeat(gap) + ' ' + BL('│'));
-  console.log(BL(`╰${'─'.repeat(width - 2)}╯`));
-}
-
-function section(title) {
-  console.log(RICH ? `  ${A('▍', '1')} ${A(title, '1')}` : `  ${title.toUpperCase()}`);
-}
-
-function hbarParts(frac, width) {
-  const cells = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
-  const clamped = Math.max(0, Math.min(1, frac));
-  const units = clamped * width * 8;
-  let fill = '';
-  let empty = '';
-  for (let i = 0; i < width; i++) {
-    const rem = units - i * 8;
-    if (rem >= 8) fill += '█';
-    else if (rem <= 0) empty += ' ';
-    else fill += cells[Math.round(rem)];
-  }
-  return { fill, empty };
-}
-
-function renderTable(headers, rows) {
-  const head = headers.map((h) => pad(h.text, h.width, h.align)).join('  ');
-  console.log('  ' + head);
-  if (RICH) {
-    const total = headers.reduce((a, h) => a + h.width, 0) + (headers.length - 1) * 2;
-    console.log('  ' + F('─'.repeat(total)));
-  }
-  for (const r of rows) {
-    const line = r.map((c, i) => {
-      const h = headers[i];
-      let s = c.color ? fg(c.color, String(c.text), c.attrs) : String(c.text);
-      return h.align === 'right' ? pad(s, h.width, 'right') : pad(s, h.width);
-    }).join('  ');
-    console.log('  ' + line);
-  }
-}
-
-function moreLine(shown, total) {
-  if (total > shown) console.log(`  ${D(`… ${total - shown} more (--limit ${total})`)}`);
-}
-
-// sort a [key, usage] list per --sort
 function sortUsageEntries(entries, sort) {
-  const cmp = (a, b) => {
-    if (sort === 'name') return a[0].localeCompare(b[0]);
-    if (sort === 'tokens') return b[1].tokens.total - a[1].tokens.total;
-    if (sort === 'calls') return b[1].calls - a[1].calls;
-    return b[1].cost.total - a[1].cost.total;
-  };
-  return entries.sort(cmp);
-}
-
-// ---------------------------------------------------------------------------
-// Views
-// ---------------------------------------------------------------------------
-
-function renderKpis(agg) {
-  const t = agg.totals;
-  const items = [
-    `${T(tok(t.tokens.total), '1')}  ${D('tokens')}`,
-    `${G(money(t.cost.total), '1')}  ${D('spent')}`,
-    `${T(tok(t.calls), '1')}  ${D('calls')}`,
-    `${CY(pct1(t.cacheHitRate * 100), '1')}  ${D('cache hit')}`,
-    `${Y(pct1(t.reasoningRatio * 100), '1')}  ${D('reasoning')}`,
-    `${G(rate(t.costPer1M), '1')}  ${D('per 1M tok')}`,
-  ];
-  console.log('  ' + items.join('    '));
-  if (agg.modelSwitches > 0) {
-    console.log(`  ${D(`${agg.modelSwitches} model switch${agg.modelSwitches === 1 ? '' : 'es'}`)}`);
-  }
-}
-
-function renderUsageTable(agg) {
-  const t = agg.totals.tokens;
-  const cst = agg.totals.cost;
-  section('Usage');
-  const headers = [
-    { text: 'LABEL', width: 12 },
-    { text: 'TOKENS', width: 13, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const rows = [
-    [{ text: 'input', color: PALETTE.muted }, { text: tok(t.input) }, { text: money(cst.input), color: PALETTE.green }],
-    [{ text: 'output', color: PALETTE.muted }, { text: tok(t.output) }, { text: money(cst.output), color: PALETTE.green }],
-    [{ text: 'cache read', color: PALETTE.muted }, { text: tok(t.cacheRead) }, { text: money(cst.cacheRead), color: PALETTE.green }],
-    [{ text: 'cache write', color: PALETTE.muted }, { text: tok(t.cacheWrite) }, { text: money(cst.cacheWrite), color: PALETTE.green }],
-    [{ text: 'reasoning', color: PALETTE.muted }, { text: tok(t.reasoning) }, { text: '' }],
-    [{ text: 'context', color: PALETTE.muted }, { text: tok(t.context), color: PALETTE.dim }, { text: '' }],
-    [{ text: 'total', color: PALETTE.muted }, { text: tok(t.total), attrs: '1' }, { text: money(cst.total), color: PALETTE.green, attrs: '1' }],
-  ];
-  renderTable(headers, rows);
-  const t2 = agg.totals;
-  console.log(
-    `  ${D('avg')} ${tok(t2.avgTokensPerCall)} ${D('tok/call ·')} ${D('cache hit')} ${pct1(t2.cacheHitRate * 100)} ${D('·')} ${D('$/1M')} ${rate(t2.costPer1M)}`
-  );
-}
-
-function renderByModel(agg, opts, limit) {
-  const rows = sortUsageEntries([...agg.byModel.entries()], opts.sort);
-  const out = rows.slice(0, limit);
-  if (out.length === 0) return;
-  section('By model');
-
-  const totalCost = Math.max(1e-9, out.reduce((a, r) => a + r[1].cost.total, 0));
-  const totalTok = Math.max(1e-9, out.reduce((a, r) => a + r[1].tokens.total, 0));
-
-  const nameW = 28, tokValW = 11, costValW = 9, pctW = 4, GAP = 2;
-  const FIXED_RICH = 70;
-  let barW = 0;
-  if (RICH) {
-    barW = Math.max(0, Math.min(20, Math.floor((termWidth() - FIXED_RICH) / 2)));
-    if (barW < 4) barW = 0;
-  }
-  const barSep = RICH && barW ? GAP + barW + GAP : GAP;
-  const tokGroupW = tokValW + barSep + pctW;
-  const costGroupW = costValW + barSep + pctW;
-
-  console.log('  ' + D(pad('MODEL', nameW)) + '  ' + D(pad('TOKENS', tokGroupW)) + '  ' + D(pad('COST', costGroupW)));
-  if (RICH) console.log('  ' + F('─'.repeat(nameW + GAP + tokGroupW + GAP + costGroupW)));
-
-  const bar = (share, color) => {
-    if (!RICH || !barW) return '';
-    const { fill, empty } = hbarParts(share, barW);
-    return '  ' + fg(color, fill) + F(empty);
-  };
-
-  for (const [key, u] of out) {
-    const nm = key.length > nameW ? key.slice(0, nameW - 1) + '…' : key;
-    const tokShare = u.tokens.total / totalTok;
-    const costShare = u.cost.total / totalCost;
-    const line =
-      '  ' + pad(nm, nameW) +
-      '  ' + pad(A(tok(u.tokens.total)), tokValW, 'right') +
-      bar(tokShare, PALETTE.accent) +
-      '  ' + pad(M(pct(tokShare * 100)), pctW, 'right') +
-      '  ' + pad(G(money(u.cost.total)), costValW, 'right') +
-      bar(costShare, PALETTE.green) +
-      '  ' + pad(M(pct(costShare * 100)), pctW, 'right');
-    console.log(line);
-  }
-}
-
-function renderModelsTable(agg, opts) {
-  const rows = sortUsageEntries([...agg.byModel.entries()], opts.sort);
-  const out = rows.slice(0, opts.limit);
-  section('Models');
-  const headers = [
-    { text: 'MODEL', width: 30 },
-    { text: 'CALLS', width: 7, align: 'right' },
-    { text: 'TOKENS', width: 12, align: 'right' },
-    { text: 'CONTEXT', width: 12, align: 'right' },
-    { text: 'CACHE%', width: 7, align: 'right' },
-    { text: 'REAS%', width: 6, align: 'right' },
-    { text: '$/1M', width: 8, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const data = out.map(([key, u]) => [
-    { text: key, color: PALETTE.text },
-    { text: tok(u.calls) },
-    { text: tok(u.tokens.total) },
-    { text: tok(u.tokens.context), color: PALETTE.dim },
-    { text: pct1(u.cacheHitRate * 100), color: PALETTE.cyan },
-    { text: pct1(u.reasoningRatio * 100), color: PALETTE.yellow },
-    { text: rate(u.costPer1M), color: PALETTE.muted },
-    { text: money(u.cost.total), color: PALETTE.green },
-  ]);
-  renderTable(headers, data);
-  moreLine(out.length, rows.length);
-}
-
-function renderProvidersTable(agg, opts) {
-  const rows = sortUsageEntries([...agg.byProvider.entries()], opts.sort);
-  const out = rows.slice(0, opts.limit);
-  section('Providers');
-  const headers = [
-    { text: 'PROVIDER', width: 16 },
-    { text: 'CALLS', width: 7, align: 'right' },
-    { text: 'TOKENS', width: 12, align: 'right' },
-    { text: 'CONTEXT', width: 12, align: 'right' },
-    { text: 'CACHE%', width: 7, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const data = out.map(([p, u]) => [
-    { text: p, color: PALETTE.text },
-    { text: tok(u.calls) },
-    { text: tok(u.tokens.total) },
-    { text: tok(u.tokens.context), color: PALETTE.dim },
-    { text: pct1(u.cacheHitRate * 100), color: PALETTE.cyan },
-    { text: money(u.cost.total), color: PALETTE.green },
-  ]);
-  renderTable(headers, data);
-  moreLine(out.length, rows.length);
-}
-
-function renderAgentsTable(agg, opts) {
-  const rows = sortUsageEntries([...agg.byAgent.entries()], opts.sort);
-  const out = rows.slice(0, opts.limit);
-  if (rows.length === 0) return;
-  section('Subagent agents');
-  const headers = [
-    { text: 'AGENT', width: 16 },
-    { text: 'CALLS', width: 7, align: 'right' },
-    { text: 'TOKENS', width: 12, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const data = out.map(([a, u]) => [
-    { text: a, color: PALETTE.muted },
-    { text: tok(u.calls) },
-    { text: tok(u.tokens.total) },
-    { text: money(u.cost.total), color: PALETTE.green },
-  ]);
-  renderTable(headers, data);
-  moreLine(out.length, rows.length);
-}
-
-function renderApiBreakdown(agg) {
-  const entries = Object.entries(agg.apiBreakdown).sort((a, b) => b[1].tokens - a[1].tokens);
-  if (entries.length === 0) return;
-  const totalTok = Math.max(1, agg.totals.tokens.total);
-  section('API');
-  for (const [api, v] of entries) {
-    const share = (v.tokens / totalTok) * 100;
-    console.log(`  ${T(api)}  ${D(tok(v.tokens) + ' tok · ' + v.calls + ' calls · ' + pct1(share))}`);
-  }
-}
-
-function renderDaysTable(agg, opts) {
-  const days = [...agg.byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  const out = days.slice(-opts.limit);
-  section(opts.group === 'day' ? 'By day' : opts.group === 'week' ? 'By week' : 'By month');
-  const maxCost = Math.max(1e-9, ...out.map(([, u]) => u.cost.total));
-  const barW = RICH ? 18 : 0;
-
-  const headers = [
-    { text: 'DATE', width: 11 },
-    { text: 'CALLS', width: 7, align: 'right' },
-    { text: 'TOKENS', width: 12, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const data = out.map(([day, u]) => [
-    { text: day, color: PALETTE.text },
-    { text: tok(u.calls) },
-    { text: tok(u.tokens.total) },
-    { text: money(u.cost.total), color: PALETTE.green },
-  ]);
-
-  const head = headers.map((h) => pad(h.text, h.width, h.align)).join('  ') + (RICH ? '  ' + pad('', barW) : '');
-  console.log('  ' + head);
-  if (RICH) {
-    const total = headers.reduce((a, h) => a + h.width, 0) + (headers.length - 1) * 2 + 2 + barW;
-    console.log('  ' + F('─'.repeat(total)));
-  }
-  data.forEach((row, i) => {
-    const [, u] = out[i];
-    const line = row.map((c, j) => {
-      const h = headers[j];
-      let s = c.color ? fg(c.color, String(c.text), c.attrs) : String(c.text);
-      return h.align === 'right' ? pad(s, h.width, 'right') : pad(s, h.width);
-    }).join('  ');
-    let extra = '';
-    if (RICH) {
-      const { fill, empty } = hbarParts(u.cost.total / maxCost, barW);
-      extra = '  ' + CY(fill) + F(empty);
-    }
-    console.log('  ' + line + extra);
-  });
-  if (days.length > out.length) console.log(`  ${D(`… ${days.length - out.length} more (--limit ${days.length})`)}`);
-}
-
-const KIND_TAG = { main: '', fork: ' ·fork', subagent: ' ·sub' };
-
-function renderSessionsTable(agg, opts) {
-  const rows = [...agg.bySession.values()].sort((a, b) => {
-    if (opts.sort === 'tokens') return b.usage.tokens.total - a.usage.tokens.total;
-    if (opts.sort === 'calls') return b.usage.calls - a.usage.calls;
-    if (opts.sort === 'name') return (a.name || a.file).localeCompare(b.name || b.file);
-    return b.usage.cost.total - a.usage.cost.total;
-  });
-  const out = rows.slice(0, opts.limit);
-  section('Sessions');
-  const headers = [
-    { text: 'SESSION', width: 34 },
-    { text: 'KIND', width: 6 },
-    { text: 'CALLS', width: 7, align: 'right' },
-    { text: 'TOKENS', width: 12, align: 'right' },
-    { text: 'COST', width: 9, align: 'right' },
-  ];
-  const data = out.map((s) => {
-    const base = path.basename(s.file, '.jsonl');
-    let name = s.name || base;
-    if (name.length > 32) name = name.slice(0, 31) + '…';
-    const kindColor = s.kind === 'main' ? PALETTE.text : s.kind === 'fork' ? PALETTE.yellow : PALETTE.muted;
-    return [
-      { text: name, color: kindColor },
-      { text: KIND_TAG[s.kind] || '', color: PALETTE.dim },
-      { text: tok(s.usage.calls) },
-      { text: tok(s.usage.tokens.total) },
-      { text: money(s.usage.cost.total), color: PALETTE.green },
-    ];
-  });
-  renderTable(headers, data);
-  moreLine(out.length, rows.length);
-}
-
-// ---------------------------------------------------------------------------
-// Delimited export (CSV / TSV)
-// ---------------------------------------------------------------------------
-
-function csvCell(v, delim) {
-  const s = String(v);
-  if (delim === '\t') return s;
-  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-  return s;
+  return entries.sort((a, b) => sort === 'name' ? a[0].localeCompare(b[0]) :
+    sort === 'tokens' ? b[1].tokens.total - a[1].tokens.total : sort === 'calls' ? b[1].calls - a[1].calls : b[1].cost.total - a[1].cost.total);
 }
 
 function exportDelimited(agg, opts, delim) {
-  const rowOf = (cells) => cells.map((c) => csvCell(c, delim)).join(delim);
-
-  const usageRow = (key, u) => [
-    key,
-    u.calls,
-    u.tokens.input, u.tokens.output, u.tokens.cacheRead, u.tokens.cacheWrite, u.tokens.reasoning, u.tokens.context, u.tokens.total,
-    u.cost.total.toFixed(6),
-    u.cacheHitRate.toFixed(4),
-    u.reasoningRatio.toFixed(4),
-    u.costPer1M.toFixed(4),
-    Math.round(u.avgTokensPerCall),
-  ];
-
-  const USAGE_HEADER = [
-    'key', 'calls', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'context', 'total_tokens',
-    'cost_total', 'cache_hit_rate', 'reasoning_ratio', 'cost_per_1M', 'avg_tokens_per_call',
-  ];
-
-  const rows = [];
-  if (opts.view === 'days') {
-    rows.push(rowOf(['date', ...USAGE_HEADER.slice(1)]));
-    for (const [day, u] of [...agg.byDay.entries()].sort()) rows.push(rowOf([day, ...usageRow(day, u).slice(1)]));
-  } else if (opts.view === 'providers') {
-    rows.push(rowOf(USAGE_HEADER));
-    for (const [p, u] of sortUsageEntries([...agg.byProvider.entries()], opts.sort)) rows.push(rowOf(usageRow(p, u)));
-  } else if (opts.view === 'agents') {
-    rows.push(rowOf(USAGE_HEADER));
-    for (const [a, u] of sortUsageEntries([...agg.byAgent.entries()], opts.sort)) rows.push(rowOf(usageRow(a, u)));
-  } else if (opts.view === 'sessions') {
-    rows.push(rowOf(['session', 'kind', 'cwd', ...USAGE_HEADER.slice(1)]));
-    for (const s of [...agg.bySession.values()].sort((a, b) => b.usage.cost.total - a.usage.cost.total)) {
-      rows.push(rowOf([s.name || s.file, s.kind, s.cwd || '', ...usageRow('', s.usage).slice(1)]));
-    }
+  const cell = value => {
+    const s = String(value);
+    if (delim === '\t') return s;
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const row = cells => cells.map(cell).join(delim);
+  const usage = u => [u.calls, u.tokens.input, u.tokens.output, u.tokens.cacheRead, u.tokens.cacheWrite,
+    u.tokens.reasoning, u.tokens.context, u.tokens.total, u.cost.total.toFixed(6),
+    u.cacheHitRate.toFixed(4), u.reasoningRatio.toFixed(4), u.costPer1M.toFixed(4), Math.round(u.avgTokensPerCall)];
+  const fields = ['calls', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'context', 'total_tokens',
+    'cost_total', 'cache_hit_rate', 'reasoning_ratio', 'cost_per_1M', 'avg_tokens_per_call'];
+  let rows;
+  if (opts.view === 'sessions') {
+    rows = [['session', 'kind', 'cwd', ...fields], ...[...agg.bySession.values()]
+      .sort((a, b) => b.usage.cost.total - a.usage.cost.total)
+      .map(s => [s.name || s.file, s.kind, s.cwd || '', ...usage(s.usage)])];
   } else {
-    // models (default)
-    rows.push(rowOf(USAGE_HEADER));
-    for (const [m, u] of sortUsageEntries([...agg.byModel.entries()], opts.sort)) rows.push(rowOf(usageRow(m, u)));
+    const entries = opts.view === 'days' ? [...agg.byDay].sort() : sortUsageEntries(
+      [...(opts.view === 'providers' ? agg.byProvider : opts.view === 'agents' ? agg.byAgent : agg.byModel)], opts.sort);
+    rows = [[opts.view === 'days' ? 'date' : 'key', ...fields], ...entries.map(([k, u]) => [k, ...usage(u)])];
   }
-  process.stdout.write(rows.join('\n') + '\n');
-}
-
-// ---------------------------------------------------------------------------
-// Output + budget gate
-// ---------------------------------------------------------------------------
-
-function budgetCheck(agg, opts) {
-  if (opts.budget == null) return;
-  if (agg.totals.cost.total > opts.budget) {
-    if (!opts.json && !opts.csv && !opts.tsv) {
-      console.error(
-        `${R('⚠ budget exceeded', '1')}: spent ${money(agg.totals.cost.total)} > budget ${money(opts.budget)}`
-      );
-    }
-    process.exitCode = 3;
-  }
-}
-
-function output(agg, opts) {
-  if (opts.json) {
-    console.log(JSON.stringify(toData(agg), null, 2));
-    return;
-  }
-  if (opts.csv || opts.tsv) {
-    exportDelimited(agg, opts, opts.tsv ? '\t' : ',');
-    return;
-  }
-
-  renderHeader(opts, agg);
-  console.log('');
-
-  switch (opts.view) {
-    case 'models':
-      renderModelsTable(agg, opts);
-      break;
-    case 'providers':
-      renderProvidersTable(agg, opts);
-      break;
-    case 'agents':
-      renderAgentsTable(agg, opts);
-      break;
-    case 'days':
-      renderDaysTable(agg, opts);
-      break;
-    case 'sessions':
-      renderSessionsTable(agg, opts);
-      break;
-    default:
-      renderKpis(agg);
-      console.log('');
-      renderUsageTable(agg);
-      console.log('');
-      renderByModel(agg, opts, 6);
-      if (agg.byProvider.size > 0) {
-        console.log('');
-        renderProvidersTable(agg, { ...opts, limit: 8 });
-      }
-      if (agg.byAgent.size > 0) {
-        console.log('');
-        renderAgentsTable(agg, { ...opts, limit: 8 });
-      }
-      if (Object.keys(agg.apiBreakdown).length > 0) {
-        console.log('');
-        renderApiBreakdown(agg);
-      }
-      break;
-  }
-  console.log('');
+  process.stdout.write(rows.map(row).join('\n') + '\n');
 }
 
 function main() {
-  const opts = parseArgs(process.argv.slice(2));
-
-  colorEnabled = !opts.plain && !NO_COLOR && (TTY || opts.color);
-  RICH = colorEnabled;
-
+  let opts;
+  try { opts = parseArgs(process.argv.slice(2)); }
+  catch (error) { console.error(error.message); process.exitCode = 2; return; }
+  const noColor = !!process.env.NO_COLOR && process.env.NO_COLOR !== '0';
+  const color = !opts.plain && !noColor && (process.stdout.isTTY || opts.color);
+  const tick = () => {
+    let agg;
+    try { agg = aggregate(opts); }
+    catch (error) { console.error(error.message); process.exitCode = 1; return; }
+    if (opts.watch && process.stdout.isTTY) process.stdout.write('\x1b[2J\x1b[H');
+    if (opts.budget != null && agg.totals.cost.total > opts.budget) {
+      process.exitCode = 3;
+      if (!opts.json && !opts.csv && !opts.tsv) console.error(`Budget exceeded: $${agg.totals.cost.total.toFixed(4)} > $${opts.budget}`);
+    }
+    if (opts.json) console.log(JSON.stringify(toData(agg), null, 2));
+    else if (opts.csv || opts.tsv) exportDelimited(agg, opts, opts.tsv ? '\t' : ',');
+    else console.log(renderDashboard(agg, opts, process.stdout.columns || 80, color));
+  };
+  tick();
   if (opts.watch) {
-    const clear = TTY && !opts.plain ? '\x1b[2J\x1b[H' : '';
-    const tick = () => {
-      process.stdout.write(clear);
-      let agg;
-      try {
-        agg = aggregate(opts);
-      } catch (e) {
-        console.error(e instanceof Error ? e.message : String(e));
-        return;
-      }
-      budgetCheck(agg, opts);
-      output(agg, opts);
-    };
-    tick();
     const timer = setInterval(tick, 2000);
-    process.on('SIGINT', () => {
-      clearInterval(timer);
-      process.exit(0);
-    });
-    return;
+    process.on('SIGINT', () => { clearInterval(timer); process.exit(process.exitCode || 0); });
   }
-
-  let agg;
-  try {
-    agg = aggregate(opts);
-  } catch (e) {
-    console.error(e instanceof Error ? e.message : String(e));
-    process.exit(1);
-  }
-
-  budgetCheck(agg, opts);
-  output(agg, opts);
 }
-
 main();

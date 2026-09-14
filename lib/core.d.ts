@@ -57,12 +57,13 @@ export interface SessionBucket {
 
 export interface AggregateResult {
   totals: Usage;
-  byModel: Map<string, ModelBucket>;
+  byModel: Map<string, Usage>;
   byProvider: Map<string, Usage>;
   byAgent: Map<string, Usage>;
   byDay: Map<string, Usage>;
   bySession: Map<string, SessionBucket>;
   modelSwitches: number;
+  /** keyed by `provider/api` (e.g. "deepseek/openai-completions") */
   apiBreakdown: Map<string, { calls: number; tokens: number }>;
   sessionsMain: number;
   sessionsFork: number;
@@ -86,6 +87,7 @@ export interface UsageData {
   byDay: Record<string, Usage>;
   bySession: Record<string, SessionData>;
   modelSwitches: number;
+  /** keyed by `provider/api` (e.g. "deepseek/openai-completions") */
   apiBreakdown: Record<string, { calls: number; tokens: number }>;
   sessionCounts: { main: number; fork: number; subagent: number };
 }

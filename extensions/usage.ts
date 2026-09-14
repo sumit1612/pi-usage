@@ -100,27 +100,27 @@ interface DayRow { day: string; calls: number; tokens: Usage["tokens"]; cost: Us
 interface SessionRow { key: string; name: string; kind: string; agent: string | null; cwd: string | null; started: string | null; calls: number; tokens: Usage["tokens"]; cost: Usage["cost"]; }
 
 function modelsOf(data: UsageData): ModelRow[] {
-  return Object.entries(data.byModel)
+  return Object.entries(data.byModel ?? {})
     .map(([key, v]) => ({ key, calls: v.calls, tokens: v.tokens, cost: v.cost, cacheHitRate: v.cacheHitRate, reasoningRatio: v.reasoningRatio, costPer1M: v.costPer1M }))
     .sort((a, b) => b.cost.total - a.cost.total);
 }
 function providersOf(data: UsageData): ModelRow[] {
-  return Object.entries(data.byProvider)
+  return Object.entries(data.byProvider ?? {})
     .map(([key, v]) => ({ key, calls: v.calls, tokens: v.tokens, cost: v.cost, cacheHitRate: v.cacheHitRate, reasoningRatio: v.reasoningRatio, costPer1M: v.costPer1M }))
     .sort((a, b) => b.cost.total - a.cost.total);
 }
 function agentsOf(data: UsageData): ModelRow[] {
-  return Object.entries(data.byAgent)
+  return Object.entries(data.byAgent ?? {})
     .map(([key, v]) => ({ key, calls: v.calls, tokens: v.tokens, cost: v.cost, cacheHitRate: v.cacheHitRate, reasoningRatio: v.reasoningRatio, costPer1M: v.costPer1M }))
     .sort((a, b) => b.cost.total - a.cost.total);
 }
 function daysOf(data: UsageData): DayRow[] {
-  return Object.entries(data.byDay)
+  return Object.entries(data.byDay ?? {})
     .map(([day, v]) => ({ day, calls: v.calls, tokens: v.tokens, cost: v.cost }))
     .sort((a, b) => b.day.localeCompare(a.day));
 }
 function sessionsOf(data: UsageData): SessionRow[] {
-  return Object.entries(data.bySession)
+  return Object.entries(data.bySession ?? {})
     .map(([file, s]) => ({
       key: file,
       name: s.name || file.split("/").pop()!.replace(/\.jsonl$/, ""),
@@ -194,11 +194,11 @@ class Dashboard {
   }
 
   private listLength(): number {
-    if (this.view === "days") return Object.keys(this.data.byDay).length;
-    if (this.view === "sessions") return Object.keys(this.data.bySession).length;
-    if (this.view === "providers") return Object.keys(this.data.byProvider).length;
-    if (this.view === "agents") return Object.keys(this.data.byAgent).length;
-    return Object.keys(this.data.byModel).length;
+    if (this.view === "days") return Object.keys(this.data.byDay ?? {}).length;
+    if (this.view === "sessions") return Object.keys(this.data.bySession ?? {}).length;
+    if (this.view === "providers") return Object.keys(this.data.byProvider ?? {}).length;
+    if (this.view === "agents") return Object.keys(this.data.byAgent ?? {}).length;
+    return Object.keys(this.data.byModel ?? {}).length;
   }
 
   handleInput(data: string): void {
@@ -289,8 +289,8 @@ function build(
   const sec = (t: string) => fg("accent", "▍") + " " + fg("accent", bold(t));
 
   const lines: string[] = [];
-  const t = data.totals;
-  const counts = data.sessionCounts;
+  const t = data.totals ?? { tokens: { total: 0 }, cost: { total: 0 }, calls: 0, cacheHitRate: 0, costPer1M: 0 };
+  const counts = data.sessionCounts ?? { main: 0, fork: 0, subagent: 0 };
 
   lines.push(fg("accent", bold("pi-usage")) + "  " + dim(`${view} · ${periodLabel} · ${counts.main} main · ${counts.fork} fork · ${counts.subagent} sub`));
   lines.push("");
@@ -349,8 +349,8 @@ function build(
 
   if (view === "overview") {
     const models = modelsOf(data);
-    const maxCost = Math.max(1e-9, ...models.map((m) => m.cost.total));
-    const maxTok = Math.max(1e-9, ...models.map((m) => m.tokens.total));
+    const totalCost = Math.max(1e-9, t.cost.total);
+    const totalTok = Math.max(1e-9, t.tokens.total);
     const nameW = 22, tokW = 6, costW = 8, pctW = 4;
     const fixed = 2 + nameW + 6 * 2 + tokW + pctW + costW + pctW;
     let barW = Math.max(0, Math.floor((width - fixed) / 2));
@@ -362,8 +362,8 @@ function build(
     lines.push("  " + dim(pad("MODEL", nameW)) + "  " + dim(pad("TOKENS", tokGroupW)) + "  " + dim(pad("COST", costGroupW)));
     if (models.length === 0) lines.push("  " + dim("no data"));
     for (const m of models.slice(0, 6)) {
-      const tokShare = m.tokens.total / maxTok;
-      const costShare = m.cost.total / maxCost;
+      const tokShare = m.tokens.total / totalTok;
+      const costShare = m.cost.total / totalCost;
       let row = "  " + pad(truncate(m.key, nameW), nameW) + "  " + pad(compact(m.tokens.total), tokW, true);
       if (barW) { const b = bar(tokShare, barW); row += "  " + fg("accent", b.fill) + fg("dim", b.empty); }
       row += "  " + pad(dim(pct(tokShare * 100)), pctW, true);

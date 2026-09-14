@@ -62,7 +62,9 @@ FLAGS
   -h, --help       show help
 ```
 
-Colors match pi's built-in **dark** theme. Output is auto-detected: rich (color + unicode) on a TTY, clean flat tables when piped.
+The CLI uses a minimal layout with one muted teal accent, a four-metric summary, and no enclosing boxes. Tables expand to the terminal width; wide terminals place breakdown/efficiency and provider/agent sections side by side. Narrow terminals stack panels and prioritize cost, tokens, and calls over optional columns. Token totals in summary tables use K/M/B notation; exports retain exact values.
+
+Color is auto-detected on a TTY; `--color` forces it and `--plain` removes color and decorative Unicode. JSON, CSV, and TSV remain machine-readable. The embedded `/usage` TUI is unchanged by this standalone CLI redesign.
 
 ## `/usage` keys
 
@@ -97,16 +99,17 @@ Flags are passed through: `/usage models`, `/usage --all`, `/usage --since 7`, `
 ## How it counts
 
 - Only `assistant`, compaction, and branch-summary usage is counted. Tool results — which can embed a *summary* of subagent usage — are skipped to avoid double-counting.
-- **Forks**: a forked session copies its parent's history with identical entry ids. Entries are deduplicated by id, so shared history is counted once and only the fork's *new* work is attributed to it.
+- **Forks**: a forked session copies its parent's history with identical entry ids. Entries are deduplicated by id within an explicitly linked parent/fork lineage, so unrelated sessions can safely reuse entry ids. Shared history is counted once and only the fork's *new* work is attributed to it. Missing parent files or cyclic parent links are treated conservatively as separate sessions.
 - **Subagents**: a subagent run may be stored twice (an artifact transcript and a `run-N/session.jsonl`). The canonical `session.jsonl` is preferred per `runId`; the transcript is skipped when it exists, so a run is never counted twice.
-- **Transcripts**: subagent artifact transcripts use a different schema (`recordType`, top-level `usage`, numeric `cost`). Both shapes are normalized.
+- **Transcripts**: subagent artifact transcripts use a different schema (`recordType`, top-level `usage`, numeric `cost`). Both shapes are normalized. Explicit provider metadata takes precedence; a missing provider is inferred only when all observed evidence for that model identifies one provider. Ambiguous models remain under `?/model` and are excluded from named-provider filters.
 
 ## Structure
 
 ```
 lib/core.js          shared aggregation engine (no dependencies)
 lib/core.d.ts        TypeScript types for the engine
-bin/pi-usage         CLI (presentation only)
+bin/pi-usage         CLI flags, exports, and watch loop
+lib/presentation.js  responsive standalone dashboard renderer
 extensions/usage.ts  /usage slash command (interactive TUI)
 test/core.test.js    correctness tests (fork dedup, subagent dedup, transcripts)
 ```
