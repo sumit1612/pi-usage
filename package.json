@@ -1,0 +1,40 @@
+{
+  "name": "pi-usage",
+  "version": "1.0.0",
+  "description": "Token, context, and cost usage dashboard for the pi coding agent — a themed CLI plus an interactive /usage command",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "usage",
+    "tokens",
+    "cost",
+    "dashboard",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sumit1612/pi-usage.git"
+  },
+  "bin": {
+    "pi-usage": "./bin/pi-usage"
+  },
+  "files": [
+    "bin",
+    "extensions",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,493 @@
+#!/usr/bin/env node
+'use strict';
+
+/*
+ * pi-usage — token / context / cost dashboard for the pi coding agent (CLI).
+ *
+ * Aggregation lives in ../lib/core.js (shared with the /usage extension).
+ * This file is presentation only: CLI parsing, theme colors, and rendering.
+ *
+ * Colors match pi's built-in "dark" theme:
+ *   accent #8abeb7 · border #5f87ff · green #b5bd68 · text #d4d4d4
+ *   muted #808080 · dim #666666 · faint #505050
+ *
+ * Usage:
+ *   pi-usage                    overview (default)
+ *   pi-usage models             per-model table
+ *   pi-usage days               per-day table with bars
+ *   pi-usage sessions           per-session table
+ *   pi-usage --json             raw JSON (any view)
+ *   pi-usage --since 7          last 7 days (default 30)
+ *   pi-usage --all              no time filter
+ *   pi-usage --model gpt        filter by model substring
+ *   pi-usage --provider openai  filter by provider substring
+ *   pi-usage --limit <n>        max rows in tables (default 15)
+ *   pi-usage --dir <path>       custom session directory
+ *   pi-usage --color            force color even when piped
+ *   pi-usage --plain            disable color + unicode (flat output)
+ */
+
+const path = require('path');
+const { aggregate, toData, DEFAULT_SESSION_DIR } = require('../lib/core.js');
+
+// ---------------------------------------------------------------------------
+// Theme (pi "dark")
+// ---------------------------------------------------------------------------
+
+const PALETTE = {
+  accent: '#8abeb7',
+  blue: '#5f87ff',
+  cyan: '#00d7ff',
+  green: '#b5bd68',
+  text: '#d4d4d4',
+  muted: '#808080',
+  dim: '#666666',
+  faint: '#505050',
+};
+
+const NO_COLOR = !!process.env.NO_COLOR && process.env.NO_COLOR !== '0';
+const TTY = process.stdout.isTTY;
+
+// set after arg parsing: colorEnabled, RICH
+let colorEnabled = false;
+let RICH = false;
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function fg(hex, s, attrs) {
+  if (!colorEnabled) return s;
+  const [r, g, b] = hexToRgb(hex);
+  const codes = (attrs ? attrs + ';' : '') + `38;2;${r};${g};${b}`;
+  return `\x1b[${codes}m${s}\x1b[0m`;
+}
+
+const A = (s, a) => fg(PALETTE.accent, s, a);
+const BL = (s, a) => fg(PALETTE.blue, s, a);
+const CY = (s, a) => fg(PALETTE.cyan, s, a);
+const G = (s, a) => fg(PALETTE.green, s, a);
+const T = (s, a) => fg(PALETTE.text, s, a);
+const M = (s, a) => fg(PALETTE.muted, s, a);
+const D = (s, a) => fg(PALETTE.dim, s, a);
+const F = (s, a) => fg(PALETTE.faint, s, a);
+
+function stripAnsi(s) {
+  return String(s).replace(/\x1b\[[0-9;]*m/g, '');
+}
+function visLen(s) {
+  return stripAnsi(s).length;
+}
+function pad(s, n, align) {
+  s = String(s);
+  const v = stripAnsi(s);
+  if (v.length >= n) return s;
+  const gap = ' '.repeat(n - v.length);
+  return align === 'right' ? gap + s : s + gap;
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+const HELP = `pi-usage — token / context / cost dashboard for pi
+
+USAGE
+  pi-usage [view] [flags]
+
+VIEWS
+  overview   totals + by-model tokens & cost  (default)
+  models     per-model table
+  days       per-day table + bars
+  sessions   per-session table
+
+FLAGS
+  --since <n>     last N days (default 30)
+  --all           include all time
+  --model <str>   filter by model substring
+  --provider <str> filter by provider substring
+  --limit <n>     max rows in tables (default 15)
+  --dir <path>    session directory (default ~/.pi/agent/sessions)
+  --color         force color even when piped
+  --plain         flat output (no color / unicode)
+  --json          machine-readable output
+  -h, --help      show help`;
+
+function parseArgs(argv) {
+  const opts = {
+    view: 'overview',
+    since: 30,
+    all: false,
+    model: null,
+    provider: null,
+    limit: 15,
+    dir: process.env.PI_SESSION_DIR || DEFAULT_SESSION_DIR,
+    json: false,
+    color: false,
+    plain: false,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => argv[++i];
+    switch (a) {
+      case '-h':
+      case '--help':
+        console.log(HELP);
+        process.exit(0);
+        break;
+      case '--since':
+        opts.since = parseInt(next(), 10);
+        if (!Number.isFinite(opts.since) || opts.since < 0) {
+          console.error('Invalid --since value (expected a non-negative integer)');
+          process.exit(2);
+        }
+        break;
+      case '--all': opts.all = true; break;
+      case '--model': opts.model = next(); break;
+      case '--provider': opts.provider = next(); break;
+      case '--limit':
+        opts.limit = parseInt(next(), 10);
+        if (!Number.isFinite(opts.limit) || opts.limit < 1) {
+          console.error('Invalid --limit value (expected a positive integer)');
+          process.exit(2);
+        }
+        break;
+      case '--dir': opts.dir = next(); break;
+      case '--json': opts.json = true; break;
+      case '--color': opts.color = true; break;
+      case '--plain': opts.plain = true; break;
+      default:
+        if (a.startsWith('-')) {
+          console.error(`Unknown flag: ${a}\n\n${HELP}`);
+          process.exit(2);
+        }
+        if (['overview', 'models', 'days', 'sessions'].includes(a)) opts.view = a;
+        else {
+          console.error(`Unknown view: ${a}\n\n${HELP}`);
+          process.exit(2);
+        }
+    }
+  }
+  return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Number formatting
+// ---------------------------------------------------------------------------
+
+function tok(n) {
+  n = Math.round(n || 0);
+  return n.toLocaleString('en-US');
+}
+
+function money(n) {
+  if (!isFinite(n)) return '$0';
+  const abs = Math.abs(n);
+  if (abs === 0) return '$0.0000';
+  if (abs >= 100) return '$' + Math.round(n).toLocaleString('en-US');
+  if (abs >= 1) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(4);
+}
+
+function pct(n) {
+  if (!isFinite(n)) return '0%';
+  if (n > 0 && n < 0.5) return n.toFixed(1) + '%';
+  return Math.round(n) + '%';
+}
+
+// ---------------------------------------------------------------------------
+// Rendering primitives
+// ---------------------------------------------------------------------------
+
+function termWidth() {
+  return (process.stdout.columns && process.stdout.columns > 20 ? process.stdout.columns : 80);
+}
+
+function periodLabel(opts) {
+  if (opts.all) return 'all time';
+  return `last ${opts.since} day${opts.since === 1 ? '' : 's'}`;
+}
+
+function metaLabel(opts, agg) {
+  const parts = [`${agg.sessionsMain} main · ${agg.sessionsSubagent} subagent`];
+  if (opts.model) parts.push(`model ~ ${opts.model}`);
+  if (opts.provider) parts.push(`provider ~ ${opts.provider}`);
+  return parts.join('  ·  ');
+}
+
+function renderHeader(opts, agg) {
+  const meta = `${periodLabel(opts)}  ·  ${metaLabel(opts, agg)}`;
+  if (!RICH) {
+    console.log(`pi-usage  ${meta}`);
+    return;
+  }
+  const width = Math.max(44, Math.min(termWidth(), 80));
+  const inner = `${A('pi-usage', '1')}   ${D(meta)}`;
+  const gap = Math.max(0, width - 2 - visLen(inner));
+  console.log(BL(`╭${'─'.repeat(width - 2)}╮`));
+  console.log(BL('│') + ' ' + inner + ' '.repeat(gap) + ' ' + BL('│'));
+  console.log(BL(`╰${'─'.repeat(width - 2)}╯`));
+}
+
+function section(title) {
+  console.log(RICH ? `  ${A('▍', '1')} ${A(title, '1')}` : `  ${title.toUpperCase()}`);
+}
+
+function hbarParts(frac, width) {
+  const cells = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+  const clamped = Math.max(0, Math.min(1, frac));
+  const units = clamped * width * 8;
+  let fill = '';
+  let empty = '';
+  for (let i = 0; i < width; i++) {
+    const rem = units - i * 8;
+    if (rem >= 8) fill += '█';
+    else if (rem <= 0) empty += ' ';
+    else fill += cells[Math.round(rem)];
+  }
+  return { fill, empty };
+}
+
+function renderTable(headers, rows) {
+  const head = headers.map((h) => pad(h.text, h.width, h.align)).join('  ');
+  console.log('  ' + head);
+  if (RICH) {
+    const total = headers.reduce((a, h) => a + h.width, 0) + (headers.length - 1) * 2;
+    console.log('  ' + F('─'.repeat(total)));
+  }
+  for (const r of rows) {
+    const line = r.map((c, i) => {
+      const h = headers[i];
+      let s = c.color ? fg(c.color, String(c.text), c.attrs) : String(c.text);
+      return h.align === 'right' ? pad(s, h.width, 'right') : pad(s, h.width);
+    }).join('  ');
+    console.log('  ' + line);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+function renderKpis(agg) {
+  const t = agg.totals;
+  const items = [
+    `${T(tok(t.tokens.total), '1')}  ${D('tokens')}`,
+    `${G(money(t.cost.total), '1')}  ${D('spent')}`,
+    `${T(tok(t.calls), '1')}  ${D('calls')}`,
+  ];
+  console.log('  ' + items.join('    '));
+}
+
+function renderUsageTable(agg) {
+  const t = agg.totals.tokens;
+  const cst = agg.totals.cost;
+  section('Usage');
+  const headers = [
+    { text: 'LABEL', width: 12 },
+    { text: 'TOKENS', width: 13, align: 'right' },
+    { text: 'COST', width: 9, align: 'right' },
+  ];
+  const rows = [
+    [{ text: 'input', color: PALETTE.muted }, { text: tok(t.input) }, { text: money(cst.input), color: PALETTE.green }],
+    [{ text: 'output', color: PALETTE.muted }, { text: tok(t.output) }, { text: money(cst.output), color: PALETTE.green }],
+    [{ text: 'cache read', color: PALETTE.muted }, { text: tok(t.cacheRead) }, { text: money(cst.cacheRead), color: PALETTE.green }],
+    [{ text: 'cache write', color: PALETTE.muted }, { text: tok(t.cacheWrite) }, { text: money(cst.cacheWrite), color: PALETTE.green }],
+    [{ text: 'reasoning', color: PALETTE.muted }, { text: tok(t.reasoning) }, { text: '' }],
+    [{ text: 'context', color: PALETTE.muted }, { text: tok(t.context), color: PALETTE.dim }, { text: '' }],
+    [{ text: 'total', color: PALETTE.muted }, { text: tok(t.total), attrs: '1' }, { text: money(cst.total), color: PALETTE.green, attrs: '1' }],
+  ];
+  renderTable(headers, rows);
+}
+
+function renderByModel(agg, opts) {
+  const rows = [...agg.byModel.values()].sort((a, b) => b.usage.cost.total - a.usage.cost.total);
+  const out = rows.slice(0, opts.limit);
+  if (out.length === 0) return;
+  section('By model');
+
+  const totalCost = Math.max(1e-9, out.reduce((a, r) => a + r.usage.cost.total, 0));
+  const totalTok = Math.max(1e-9, out.reduce((a, r) => a + r.usage.tokens.total, 0));
+
+  const nameW = 26, tokValW = 11, costValW = 9, pctW = 4, GAP = 2;
+  const FIXED_RICH = 68;
+  let barW = 0;
+  if (RICH) {
+    barW = Math.max(0, Math.min(20, Math.floor((termWidth() - FIXED_RICH) / 2)));
+    if (barW < 4) barW = 0;
+  }
+  const barSep = RICH && barW ? GAP + barW + GAP : GAP;
+  const tokGroupW = tokValW + barSep + pctW;
+  const costGroupW = costValW + barSep + pctW;
+
+  console.log('  ' + D(pad('MODEL', nameW)) + '  ' + D(pad('TOKENS', tokGroupW)) + '  ' + D(pad('COST', costGroupW)));
+  if (RICH) console.log('  ' + F('─'.repeat(nameW + GAP + tokGroupW + GAP + costGroupW)));
+
+  const bar = (share, color) => {
+    if (!RICH || !barW) return '';
+    const { fill, empty } = hbarParts(share, barW);
+    return '  ' + fg(color, fill) + F(empty);
+  };
+
+  for (const r of out) {
+    const name = r.model ? `${r.provider || '?'}/${r.model}` : 'summary';
+    const nm = name.length > nameW ? name.slice(0, nameW - 1) + '…' : name;
+    const tokShare = r.usage.tokens.total / totalTok;
+    const costShare = r.usage.cost.total / totalCost;
+    const line =
+      '  ' + pad(nm, nameW) +
+      '  ' + pad(A(tok(r.usage.tokens.total)), tokValW, 'right') +
+      bar(tokShare, PALETTE.accent) +
+      '  ' + pad(M(pct(tokShare * 100)), pctW, 'right') +
+      '  ' + pad(G(money(r.usage.cost.total)), costValW, 'right') +
+      bar(costShare, PALETTE.green) +
+      '  ' + pad(M(pct(costShare * 100)), pctW, 'right');
+    console.log(line);
+  }
+}
+
+function renderModelsTable(agg, opts) {
+  const rows = [...agg.byModel.values()].sort((a, b) => b.usage.cost.total - a.usage.cost.total);
+  const out = rows.slice(0, opts.limit);
+  section('Models');
+  const headers = [
+    { text: 'MODEL', width: 30 },
+    { text: 'CALLS', width: 7, align: 'right' },
+    { text: 'TOKENS', width: 12, align: 'right' },
+    { text: 'CONTEXT', width: 12, align: 'right' },
+    { text: 'COST', width: 9, align: 'right' },
+  ];
+  const data = out.map((r) => {
+    const name = r.model ? `${r.provider || '?'}/${r.model}` : 'summary';
+    return [
+      { text: name, color: PALETTE.text },
+      { text: tok(r.usage.calls) },
+      { text: tok(r.usage.tokens.total) },
+      { text: tok(r.usage.tokens.context), color: PALETTE.dim },
+      { text: money(r.usage.cost.total), color: PALETTE.green },
+    ];
+  });
+  renderTable(headers, data);
+  if (rows.length > out.length) console.log(`  ${D(`… ${rows.length - out.length} more (--limit ${rows.length})`)}`);
+}
+
+function renderDaysTable(agg, opts) {
+  const days = [...agg.byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out = days.slice(-opts.limit);
+  section('By day');
+  const maxCost = Math.max(1e-9, ...out.map(([, u]) => u.cost.total));
+  const barW = RICH ? 18 : 0;
+
+  const headers = [
+    { text: 'DATE', width: 11 },
+    { text: 'CALLS', width: 7, align: 'right' },
+    { text: 'TOKENS', width: 12, align: 'right' },
+    { text: 'COST', width: 9, align: 'right' },
+  ];
+  const data = out.map(([day, u]) => [
+    { text: day, color: PALETTE.text },
+    { text: tok(u.calls) },
+    { text: tok(u.tokens.total) },
+    { text: money(u.cost.total), color: PALETTE.green },
+  ]);
+
+  const head = headers.map((h) => pad(h.text, h.width, h.align)).join('  ') + (RICH ? '  ' + pad('', barW) : '');
+  console.log('  ' + head);
+  if (RICH) {
+    const total = headers.reduce((a, h) => a + h.width, 0) + (headers.length - 1) * 2 + 2 + barW;
+    console.log('  ' + F('─'.repeat(total)));
+  }
+  data.forEach((row, i) => {
+    const [, u] = out[i];
+    const line = row.map((c, j) => {
+      const h = headers[j];
+      let s = c.color ? fg(c.color, String(c.text), c.attrs) : String(c.text);
+      return h.align === 'right' ? pad(s, h.width, 'right') : pad(s, h.width);
+    }).join('  ');
+    let extra = '';
+    if (RICH) {
+      const { fill, empty } = hbarParts(u.cost.total / maxCost, barW);
+      extra = '  ' + CY(fill) + F(empty);
+    }
+    console.log('  ' + line + extra);
+  });
+}
+
+function renderSessionsTable(agg, opts) {
+  const rows = [...agg.bySession.values()].sort((a, b) => b.usage.cost.total - a.usage.cost.total);
+  const out = rows.slice(0, opts.limit);
+  section('Sessions');
+  const headers = [
+    { text: 'SESSION', width: 34 },
+    { text: 'CALLS', width: 7, align: 'right' },
+    { text: 'TOKENS', width: 12, align: 'right' },
+    { text: 'COST', width: 9, align: 'right' },
+  ];
+  const data = out.map((s) => {
+    const base = path.basename(s.file, '.jsonl');
+    let name = s.name || base;
+    if (name.length > 32) name = name.slice(0, 31) + '…';
+    return [
+      { text: name, color: s.kind === 'main' ? PALETTE.text : PALETTE.muted },
+      { text: tok(s.usage.calls) },
+      { text: tok(s.usage.tokens.total) },
+      { text: money(s.usage.cost.total), color: PALETTE.green },
+    ];
+  });
+  renderTable(headers, data);
+  if (rows.length > out.length) console.log(`  ${D(`… ${rows.length - out.length} more (--limit ${rows.length})`)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+
+  colorEnabled = !opts.plain && !NO_COLOR && (TTY || opts.color);
+  RICH = colorEnabled;
+
+  let agg;
+  try {
+    agg = aggregate(opts);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(toData(agg), null, 2));
+    return;
+  }
+
+  renderHeader(opts, agg);
+
+  switch (opts.view) {
+    case 'models':
+      console.log('');
+      renderModelsTable(agg, opts);
+      break;
+    case 'days':
+      console.log('');
+      renderDaysTable(agg, opts);
+      break;
+    case 'sessions':
+      console.log('');
+      renderSessionsTable(agg, opts);
+      break;
+    default:
+      console.log('');
+      renderKpis(agg);
+      console.log('');
+      renderUsageTable(agg);
+      console.log('');
+      renderByModel(agg, { ...opts, limit: 6 });
+      break;
+  }
+  console.log('');
+}
+
+main();
