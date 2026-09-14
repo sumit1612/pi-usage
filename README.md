@@ -14,8 +14,8 @@ Both read the same session data and always agree.
 ### As a pi package (recommended)
 
 ```bash
-pi install npm:pi-usage                 # from npm
-pi install git:github.com/you/pi-usage  # from git
+pi install npm:@sumitsingh001/pi-usage   # from npm
+pi install git:github.com/sumit1612/pi-usage  # from git
 pi install /path/to/pi-usage            # local directory
 ```
 
@@ -24,7 +24,7 @@ This loads the `/usage` slash command automatically. Then type `/usage` in pi.
 ### As a standalone CLI
 
 ```bash
-npm install -g pi-usage
+npm install -g @sumitsingh001/pi-usage
 pi-usage            # overview
 pi-usage models     # per-model table
 ```
@@ -91,8 +91,8 @@ extensions/usage.ts  /usage slash command (interactive TUI)
 ## Publishing
 
 ```bash
-npm publish
-# or push to GitHub and: pi install git:github.com/<you>/pi-usage
+npm publish --access public   # scoped packages default to private
+# or push to GitHub and: pi install git:github.com/sumit1612/pi-usage
 ```
 
 Tag with `pi-package` (already in `package.json`) to appear in the [package gallery](https://pi.dev/packages).
