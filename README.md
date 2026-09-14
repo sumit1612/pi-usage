@@ -7,6 +7,8 @@ Token, context, and cost usage dashboard for the [pi coding agent](https://githu
 
 Both read the same session data and always agree.
 
+![pi-usage dashboard](docs/screenshot.png)
+
 ## Install
 
 ### As a pi package (recommended)

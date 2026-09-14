@@ -24,11 +24,13 @@
     "bin",
     "extensions",
     "lib",
+    "docs",
     "README.md",
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions"],
+    "image": "./docs/screenshot.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
